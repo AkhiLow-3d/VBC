@@ -1,9 +1,11 @@
 import os
 import subprocess
+import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
 
 VIDEO_EXTS = (".mp4", ".mov", ".mkv", ".avi")
+
 
 class App:
     def __init__(self, root):
@@ -13,6 +15,7 @@ class App:
         self.input_dir = tk.StringVar()
         self.crf = tk.IntVar(value=23)
         self.preset = tk.StringVar(value="medium")
+        self.is_running = False
 
         # ===== 入力フォルダ =====
         tk.Label(root, text="入力フォルダ").pack(anchor="w")
@@ -31,14 +34,13 @@ class App:
             to=28,
             orient="horizontal",
             resolution=1,
-            variable=self.crf
+            variable=self.crf,
+            command=lambda value: self.update_label()
         )
         self.slider.pack(fill="x")
 
         self.crf_label = tk.Label(root, text="CRF 23（標準）")
         self.crf_label.pack()
-
-        self.slider.bind("<Motion>", self.update_label)
 
         # ===== preset選択 =====
         tk.Label(root, text="圧縮速度 / 効率").pack(anchor="w")
@@ -48,17 +50,23 @@ class App:
 
         presets = ["fast", "medium", "slow"]
         for p in presets:
-            tk.Radiobutton(preset_frame, text=p, value=p, variable=self.preset).pack(side="left")
+            tk.Radiobutton(
+                preset_frame,
+                text=p,
+                value=p,
+                variable=self.preset
+            ).pack(side="left")
 
         # ===== 開始ボタン =====
-        tk.Button(root, text="開始", command=self.start).pack(pady=5)
+        self.start_button = tk.Button(root, text="開始", command=self.start)
+        self.start_button.pack(pady=5)
 
         # ===== ログ =====
         tk.Label(root, text="ログ").pack(anchor="w")
         self.log = scrolledtext.ScrolledText(root, height=15)
         self.log.pack(fill="both", expand=True)
 
-    def update_label(self, event=None):
+    def update_label(self):
         value = self.crf.get()
         text = f"CRF {value}"
 
@@ -77,27 +85,58 @@ class App:
             self.input_dir.set(folder)
 
     def log_write(self, text):
+        self.root.after(0, self._log_write_main_thread, text)
+
+    def _log_write_main_thread(self, text):
         self.log.insert(tk.END, text + "\n")
         self.log.see(tk.END)
-        self.root.update()
+
+    def set_running_state(self, running):
+        self.root.after(0, self._set_running_state_main_thread, running)
+
+    def _set_running_state_main_thread(self, running):
+        self.is_running = running
+        self.start_button.config(state="disabled" if running else "normal")
 
     def start(self):
+        if self.is_running:
+            return
+
         input_dir = self.input_dir.get()
 
         if not os.path.isdir(input_dir):
             messagebox.showerror("エラー", "フォルダを選択してください")
             return
 
+        self.set_running_state(True)
+
+        thread = threading.Thread(
+            target=self.compress_videos,
+            args=(input_dir, self.crf.get(), self.preset.get()),
+            daemon=True
+        )
+        thread.start()
+
+    def compress_videos(self, input_dir, crf, preset):
         output_dir = os.path.join(input_dir, "compressed")
         os.makedirs(output_dir, exist_ok=True)
 
-        crf = self.crf.get()
-        preset = self.preset.get()
+        files = [
+            file for file in os.listdir(input_dir)
+            if file.lower().endswith(VIDEO_EXTS)
+        ]
 
-        for file in os.listdir(input_dir):
-            if not file.lower().endswith(VIDEO_EXTS):
-                continue
+        if not files:
+            self.log_write("対象動画がありません。")
+            self.set_running_state(False)
+            return
 
+        self.log_write("=== 処理開始 ===")
+        self.log_write(f"CRF: {crf}")
+        self.log_write(f"Preset: {preset}")
+        self.log_write(f"出力先: {output_dir}")
+
+        for file in files:
             if "_compressed" in file:
                 self.log_write(f"スキップ（圧縮済み）: {file}")
                 continue
@@ -114,26 +153,40 @@ class App:
 
             cmd = [
                 "ffmpeg",
+                "-hide_banner",
+                "-y",
                 "-i", input_path,
                 "-c:v", "libx264",
                 "-crf", str(crf),
                 "-preset", preset,
                 "-c:a", "aac",
                 "-b:a", "128k",
-                "-y",
                 output_path
             ]
 
             try:
-                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                self.log_write(f"完了: {file}")
+                result = subprocess.run(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+
+                if result.returncode == 0:
+                    self.log_write(f"完了: {file}")
+                else:
+                    self.log_write(f"失敗: {file}")
+                    self.log_write(result.stderr[-1000:])
+
             except Exception as e:
                 self.log_write(f"失敗: {file} | {e}")
 
         self.log_write("=== 全処理終了 ===")
+        self.set_running_state(False)
 
 
 if __name__ == "__main__":
     root = tk.Tk()
+    root.geometry("700x500")
     app = App(root)
     root.mainloop()
