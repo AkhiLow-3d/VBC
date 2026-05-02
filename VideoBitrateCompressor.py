@@ -15,8 +15,10 @@ class App:
         self.input_dir = tk.StringVar()
         self.crf = tk.IntVar(value=23)
         self.preset = tk.StringVar(value="medium")
+        self.encoder = tk.StringVar(value="CPU (libx264)")
         self.is_running = False
 
+        # ===== 入力フォルダ =====
         tk.Label(root, text="入力フォルダ").pack(anchor="w")
         frame = tk.Frame(root)
         frame.pack(fill="x")
@@ -24,12 +26,24 @@ class App:
         tk.Entry(frame, textvariable=self.input_dir).pack(side="left", fill="x", expand=True)
         tk.Button(frame, text="参照", command=self.select_folder).pack(side="right")
 
-        tk.Label(root, text="品質（CRF）").pack(anchor="w")
+        # ===== エンコード方式 =====
+        tk.Label(root, text="エンコード方式").pack(anchor="w")
+
+        encoder_menu = tk.OptionMenu(
+            root,
+            self.encoder,
+            "CPU (libx264)",
+            "GPU (NVIDIA NVENC)"
+        )
+        encoder_menu.pack(fill="x")
+
+        # ===== CRF / CQ =====
+        tk.Label(root, text="品質（CPU: CRF / GPU: CQ）").pack(anchor="w")
 
         self.slider = tk.Scale(
             root,
             from_=18,
-            to=28,
+            to=36,
             orient="horizontal",
             resolution=1,
             variable=self.crf,
@@ -37,15 +51,16 @@ class App:
         )
         self.slider.pack(fill="x")
 
-        self.crf_label = tk.Label(root, text="CRF 23（標準）")
+        self.crf_label = tk.Label(root, text="品質 23（標準）")
         self.crf_label.pack()
 
-        tk.Label(root, text="圧縮速度 / 効率").pack(anchor="w")
+        # ===== CPU preset =====
+        tk.Label(root, text="CPU圧縮速度 / 効率").pack(anchor="w")
 
         preset_frame = tk.Frame(root)
         preset_frame.pack()
 
-        for p in ["fast", "medium", "slow"]:
+        for p in ["veryfast", "fast", "medium", "slow"]:
             tk.Radiobutton(
                 preset_frame,
                 text=p,
@@ -53,9 +68,11 @@ class App:
                 variable=self.preset
             ).pack(side="left")
 
+        # ===== 開始ボタン =====
         self.start_button = tk.Button(root, text="開始", command=self.start)
         self.start_button.pack(pady=5)
 
+        # ===== 進捗 =====
         self.current_file_label = tk.Label(root, text="現在のファイル：なし")
         self.current_file_label.pack(anchor="w")
 
@@ -73,22 +90,24 @@ class App:
         self.total_progress_label = tk.Label(root, text="0%")
         self.total_progress_label.pack(anchor="w")
 
+        # ===== ログ =====
         tk.Label(root, text="ログ").pack(anchor="w")
         self.log = scrolledtext.ScrolledText(root, height=12)
         self.log.pack(fill="both", expand=True)
 
+        self.update_label()
+
     def update_label(self):
         value = self.crf.get()
-        text = f"CRF {value}"
 
         if value <= 20:
-            text += "（高画質）"
+            level = "高画質"
         elif value <= 24:
-            text += "（標準）"
+            level = "標準"
         else:
-            text += "（容量優先）"
+            level = "容量優先"
 
-        self.crf_label.config(text=text)
+        self.crf_label.config(text=f"品質 {value}（{level}）")
 
     def select_folder(self):
         folder = filedialog.askdirectory()
@@ -110,7 +129,10 @@ class App:
         self.start_button.config(state="disabled" if running else "normal")
 
     def set_current_file(self, filename):
-        self.root.after(0, lambda: self.current_file_label.config(text=f"現在のファイル：{filename}"))
+        self.root.after(
+            0,
+            lambda: self.current_file_label.config(text=f"現在のファイル：{filename}")
+        )
 
     def update_file_progress(self, percent):
         self.root.after(0, self._update_file_progress_main_thread, percent)
@@ -142,7 +164,12 @@ class App:
 
         thread = threading.Thread(
             target=self.compress_videos,
-            args=(input_dir, self.crf.get(), self.preset.get()),
+            args=(
+                input_dir,
+                self.crf.get(),
+                self.preset.get(),
+                self.encoder.get()
+            ),
             daemon=True
         )
         thread.start()
@@ -171,7 +198,39 @@ class App:
         except ValueError:
             return None
 
-    def compress_videos(self, input_dir, crf, preset):
+    def build_ffmpeg_command(self, input_path, output_path, quality, cpu_preset, encoder):
+        if encoder == "GPU (NVIDIA NVENC)":
+            return [
+                "ffmpeg",
+                "-hide_banner",
+                "-y",
+                "-i", input_path,
+                "-c:v", "h264_nvenc",
+                "-cq", str(quality),
+                "-preset", "p4",
+                "-c:a", "aac",
+                "-b:a", "128k",
+                "-progress", "pipe:1",
+                "-nostats",
+                output_path
+            ]
+
+        return [
+            "ffmpeg",
+            "-hide_banner",
+            "-y",
+            "-i", input_path,
+            "-c:v", "libx264",
+            "-crf", str(quality),
+            "-preset", cpu_preset,
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-progress", "pipe:1",
+            "-nostats",
+            output_path
+        ]
+
+    def compress_videos(self, input_dir, quality, cpu_preset, encoder):
         output_dir = os.path.join(input_dir, "compressed")
         os.makedirs(output_dir, exist_ok=True)
 
@@ -190,8 +249,9 @@ class App:
         completed_files = 0
 
         self.log_write("=== 処理開始 ===")
-        self.log_write(f"CRF: {crf}")
-        self.log_write(f"Preset: {preset}")
+        self.log_write(f"Encoder: {encoder}")
+        self.log_write(f"Quality: {quality}")
+        self.log_write(f"CPU Preset: {cpu_preset}")
         self.log_write(f"出力先: {output_dir}")
 
         for file in files:
@@ -215,20 +275,13 @@ class App:
 
             self.log_write(f"処理開始: {file}")
 
-            cmd = [
-                "ffmpeg",
-                "-hide_banner",
-                "-y",
-                "-i", input_path,
-                "-c:v", "libx264",
-                "-crf", str(crf),
-                "-preset", preset,
-                "-c:a", "aac",
-                "-b:a", "128k",
-                "-progress", "pipe:1",
-                "-nostats",
-                output_path
-            ]
+            cmd = self.build_ffmpeg_command(
+                input_path,
+                output_path,
+                quality,
+                cpu_preset,
+                encoder
+            )
 
             try:
                 process = subprocess.Popen(
@@ -238,8 +291,6 @@ class App:
                     text=True,
                     bufsize=1
                 )
-
-                stderr_lines = []
 
                 while True:
                     line = process.stdout.readline()
@@ -259,9 +310,6 @@ class App:
                             pass
 
                 stderr = process.stderr.read()
-                if stderr:
-                    stderr_lines.append(stderr)
-
                 returncode = process.wait()
 
                 if returncode == 0:
@@ -269,7 +317,7 @@ class App:
                     self.log_write(f"完了: {file}")
                 else:
                     self.log_write(f"失敗: {file}")
-                    self.log_write("".join(stderr_lines)[-1000:])
+                    self.log_write(stderr[-1500:])
 
             except Exception as e:
                 self.log_write(f"失敗: {file} | {e}")
@@ -284,6 +332,6 @@ class App:
 
 if __name__ == "__main__":
     root = tk.Tk()
-    root.geometry("720x580")
+    root.geometry("720x620")
     app = App(root)
     root.mainloop()
