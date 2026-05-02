@@ -1,10 +1,12 @@
 import os
+import json
 import subprocess
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 VIDEO_EXTS = (".mp4", ".mov", ".mkv", ".avi")
+SETTINGS_FILE = "settings.json"
 
 
 class App:
@@ -13,7 +15,7 @@ class App:
         self.root.title("Video CRF Compressor")
 
         self.input_dir = tk.StringVar()
-        self.crf = tk.IntVar(value=23)
+        self.quality = tk.IntVar(value=23)
         self.preset = tk.StringVar(value="medium")
         self.encoder = tk.StringVar(value="CPU (libx264)")
         self.is_running = False
@@ -28,16 +30,14 @@ class App:
 
         # ===== エンコード方式 =====
         tk.Label(root, text="エンコード方式").pack(anchor="w")
-
-        encoder_menu = tk.OptionMenu(
+        tk.OptionMenu(
             root,
             self.encoder,
             "CPU (libx264)",
             "GPU (NVIDIA NVENC)"
-        )
-        encoder_menu.pack(fill="x")
+        ).pack(fill="x")
 
-        # ===== CRF / CQ =====
+        # ===== 品質スライダー =====
         tk.Label(root, text="品質（CPU: CRF / GPU: CQ）").pack(anchor="w")
 
         self.slider = tk.Scale(
@@ -46,17 +46,16 @@ class App:
             to=36,
             orient="horizontal",
             resolution=1,
-            variable=self.crf,
+            variable=self.quality,
             command=lambda value: self.update_label()
         )
         self.slider.pack(fill="x")
 
-        self.crf_label = tk.Label(root, text="品質 23（標準）")
-        self.crf_label.pack()
+        self.quality_label = tk.Label(root, text="品質 23（標準）")
+        self.quality_label.pack()
 
         # ===== CPU preset =====
         tk.Label(root, text="CPU圧縮速度 / 効率").pack(anchor="w")
-
         preset_frame = tk.Frame(root)
         preset_frame.pack()
 
@@ -71,6 +70,14 @@ class App:
         # ===== 開始ボタン =====
         self.start_button = tk.Button(root, text="開始", command=self.start)
         self.start_button.pack(pady=5)
+
+        # ===== フォルダを開くボタン =====
+        self.open_button = tk.Button(
+            root,
+            text="出力フォルダを開く",
+            command=self.open_output_folder
+        )
+        self.open_button.pack(pady=3)
 
         # ===== 進捗 =====
         self.current_file_label = tk.Label(root, text="現在のファイル：なし")
@@ -95,24 +102,80 @@ class App:
         self.log = scrolledtext.ScrolledText(root, height=12)
         self.log.pack(fill="both", expand=True)
 
+        self.load_settings()
         self.update_label()
 
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    # ===== フォルダを開く =====
+    def open_output_folder(self):
+        input_dir = self.input_dir.get()
+
+        if not os.path.isdir(input_dir):
+            return
+
+        output_dir = os.path.join(input_dir, "compressed")
+
+        if os.path.exists(output_dir):
+            os.startfile(output_dir)
+        else:
+            messagebox.showinfo("情報", "まだ出力フォルダが作成されていません")
+
+    # ===== 設定保存 =====
+    def load_settings(self):
+        if not os.path.exists(SETTINGS_FILE):
+            return
+
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+
+            self.input_dir.set(settings.get("input_dir", ""))
+            self.encoder.set(settings.get("encoder", "CPU (libx264)"))
+            self.quality.set(settings.get("quality", 23))
+            self.preset.set(settings.get("cpu_preset", "medium"))
+
+        except Exception:
+            pass
+
+    def save_settings(self):
+        settings = {
+            "input_dir": self.input_dir.get(),
+            "encoder": self.encoder.get(),
+            "quality": self.quality.get(),
+            "cpu_preset": self.preset.get()
+        }
+
+        try:
+            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+                json.dump(settings, f, ensure_ascii=False, indent=4)
+        except Exception:
+            pass
+
+    def on_close(self):
+        self.save_settings()
+        self.root.destroy()
+
+    # ===== UI更新 =====
     def update_label(self):
-        value = self.crf.get()
+        value = self.quality.get()
 
         if value <= 20:
             level = "高画質"
         elif value <= 24:
             level = "標準"
-        else:
+        elif value <= 28:
             level = "容量優先"
+        else:
+            level = "かなり軽量"
 
-        self.crf_label.config(text=f"品質 {value}（{level}）")
+        self.quality_label.config(text=f"品質 {value}（{level}）")
 
     def select_folder(self):
         folder = filedialog.askdirectory()
         if folder:
             self.input_dir.set(folder)
+            self.save_settings()
 
     def log_write(self, text):
         self.root.after(0, self._log_write_main_thread, text)
@@ -129,10 +192,7 @@ class App:
         self.start_button.config(state="disabled" if running else "normal")
 
     def set_current_file(self, filename):
-        self.root.after(
-            0,
-            lambda: self.current_file_label.config(text=f"現在のファイル：{filename}")
-        )
+        self.root.after(0, lambda: self.current_file_label.config(text=f"現在のファイル：{filename}"))
 
     def update_file_progress(self, percent):
         self.root.after(0, self._update_file_progress_main_thread, percent)
@@ -150,6 +210,7 @@ class App:
         self.total_progress["value"] = percent
         self.total_progress_label.config(text=f"{percent:.1f}%")
 
+    # ===== 開始 =====
     def start(self):
         if self.is_running:
             return
@@ -160,73 +221,56 @@ class App:
             messagebox.showerror("エラー", "フォルダを選択してください")
             return
 
+        self.save_settings()
         self.set_running_state(True)
 
         thread = threading.Thread(
             target=self.compress_videos,
-            args=(
-                input_dir,
-                self.crf.get(),
-                self.preset.get(),
-                self.encoder.get()
-            ),
+            args=(input_dir, self.quality.get(), self.preset.get(), self.encoder.get()),
             daemon=True
         )
         thread.start()
 
+    # ===== 動画処理 =====
     def get_duration_seconds(self, input_path):
         cmd = [
-            "ffprobe",
-            "-v", "error",
+            "ffprobe", "-v", "error",
             "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1",
             input_path
         ]
 
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
         if result.returncode != 0:
             return None
 
         try:
             return float(result.stdout.strip())
-        except ValueError:
+        except:
             return None
 
     def build_ffmpeg_command(self, input_path, output_path, quality, cpu_preset, encoder):
         if encoder == "GPU (NVIDIA NVENC)":
             return [
-                "ffmpeg",
-                "-hide_banner",
-                "-y",
+                "ffmpeg", "-hide_banner", "-y",
                 "-i", input_path,
                 "-c:v", "h264_nvenc",
                 "-cq", str(quality),
                 "-preset", "p4",
-                "-c:a", "aac",
-                "-b:a", "128k",
-                "-progress", "pipe:1",
-                "-nostats",
+                "-c:a", "aac", "-b:a", "128k",
+                "-progress", "pipe:1", "-nostats",
                 output_path
             ]
 
         return [
-            "ffmpeg",
-            "-hide_banner",
-            "-y",
+            "ffmpeg", "-hide_banner", "-y",
             "-i", input_path,
             "-c:v", "libx264",
             "-crf", str(quality),
             "-preset", cpu_preset,
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-progress", "pipe:1",
-            "-nostats",
+            "-c:a", "aac", "-b:a", "128k",
+            "-progress", "pipe:1", "-nostats",
             output_path
         ]
 
@@ -234,25 +278,10 @@ class App:
         output_dir = os.path.join(input_dir, "compressed")
         os.makedirs(output_dir, exist_ok=True)
 
-        files = [
-            file for file in os.listdir(input_dir)
-            if file.lower().endswith(VIDEO_EXTS)
-            and "_compressed" not in file
-        ]
-
-        if not files:
-            self.log_write("対象動画がありません。")
-            self.set_running_state(False)
-            return
+        files = [f for f in os.listdir(input_dir) if f.lower().endswith(VIDEO_EXTS) and "_compressed" not in f]
 
         total_files = len(files)
         completed_files = 0
-
-        self.log_write("=== 処理開始 ===")
-        self.log_write(f"Encoder: {encoder}")
-        self.log_write(f"Quality: {quality}")
-        self.log_write(f"CPU Preset: {cpu_preset}")
-        self.log_write(f"出力先: {output_dir}")
 
         for file in files:
             input_path = os.path.join(input_dir, file)
@@ -263,70 +292,32 @@ class App:
             self.update_file_progress(0)
 
             if os.path.exists(output_path):
-                self.log_write(f"スキップ（既に存在）: {file}")
                 completed_files += 1
                 self.update_total_progress(completed_files / total_files * 100)
                 continue
 
             duration = self.get_duration_seconds(input_path)
 
-            if duration is None or duration <= 0:
-                self.log_write(f"動画時間を取得できませんでした。処理は続行します: {file}")
+            cmd = self.build_ffmpeg_command(input_path, output_path, quality, cpu_preset, encoder)
 
-            self.log_write(f"処理開始: {file}")
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
-            cmd = self.build_ffmpeg_command(
-                input_path,
-                output_path,
-                quality,
-                cpu_preset,
-                encoder
-            )
+            while True:
+                line = process.stdout.readline()
+                if line == "" and process.poll() is not None:
+                    break
 
-            try:
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    bufsize=1
-                )
+                if line.startswith("out_time_ms=") and duration:
+                    out_time_ms = int(line.split("=")[1])
+                    percent = (out_time_ms / 1_000_000) / duration * 100
+                    self.update_file_progress(percent)
 
-                while True:
-                    line = process.stdout.readline()
-
-                    if line == "" and process.poll() is not None:
-                        break
-
-                    line = line.strip()
-
-                    if line.startswith("out_time_ms=") and duration:
-                        try:
-                            out_time_ms = int(line.split("=")[1])
-                            current_seconds = out_time_ms / 1_000_000
-                            percent = current_seconds / duration * 100
-                            self.update_file_progress(percent)
-                        except ValueError:
-                            pass
-
-                stderr = process.stderr.read()
-                returncode = process.wait()
-
-                if returncode == 0:
-                    self.update_file_progress(100)
-                    self.log_write(f"完了: {file}")
-                else:
-                    self.log_write(f"失敗: {file}")
-                    self.log_write(stderr[-1500:])
-
-            except Exception as e:
-                self.log_write(f"失敗: {file} | {e}")
+            process.wait()
 
             completed_files += 1
             self.update_total_progress(completed_files / total_files * 100)
 
         self.set_current_file("なし")
-        self.log_write("=== 全処理終了 ===")
         self.set_running_state(False)
 
 
