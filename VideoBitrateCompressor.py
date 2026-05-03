@@ -101,6 +101,7 @@ class App:
 
     def open_output_folder(self):
         input_dir = self.input_dir.get()
+
         if not os.path.isdir(input_dir):
             return
 
@@ -180,7 +181,10 @@ class App:
         self.start_button.config(state="disabled" if running else "normal")
 
     def set_current_file(self, filename):
-        self.root.after(0, lambda: self.current_file_label.config(text=f"現在のファイル：{filename}"))
+        self.root.after(
+            0,
+            lambda: self.current_file_label.config(text=f"現在のファイル：{filename}")
+        )
 
     def update_file_progress(self, percent):
         self.root.after(0, self._update_file_progress_main_thread, percent)
@@ -211,15 +215,22 @@ class App:
         self.save_settings()
         self.set_running_state(True)
 
-        threading.Thread(
+        thread = threading.Thread(
             target=self.compress_videos,
-            args=(input_dir, self.quality.get(), self.preset.get(), self.encoder.get()),
+            args=(
+                input_dir,
+                self.quality.get(),
+                self.preset.get(),
+                self.encoder.get()
+            ),
             daemon=True
-        ).start()
+        )
+        thread.start()
 
     def get_duration_seconds(self, input_path):
         cmd = [
-            "ffprobe", "-v", "error",
+            "ffprobe",
+            "-v", "error",
             "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1",
             input_path
@@ -229,37 +240,46 @@ class App:
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace"
+            text=True
         )
+
+        if result.returncode != 0:
+            return None
 
         try:
             return float(result.stdout.strip())
-        except:
+        except ValueError:
             return None
 
     def build_ffmpeg_command(self, input_path, output_path, quality, cpu_preset, encoder):
         if encoder == "GPU (NVIDIA NVENC)":
             return [
-                "ffmpeg", "-hide_banner", "-y",
+                "ffmpeg",
+                "-hide_banner",
+                "-y",
                 "-i", input_path,
                 "-c:v", "h264_nvenc",
                 "-cq", str(quality),
                 "-preset", "p4",
-                "-c:a", "aac", "-b:a", "128k",
-                "-progress", "pipe:1", "-nostats",
+                "-c:a", "aac",
+                "-b:a", "128k",
+                "-progress", "pipe:1",
+                "-nostats",
                 output_path
             ]
 
         return [
-            "ffmpeg", "-hide_banner", "-y",
+            "ffmpeg",
+            "-hide_banner",
+            "-y",
             "-i", input_path,
             "-c:v", "libx264",
             "-crf", str(quality),
             "-preset", cpu_preset,
-            "-c:a", "aac", "-b:a", "128k",
-            "-progress", "pipe:1", "-nostats",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-progress", "pipe:1",
+            "-nostats",
             output_path
         ]
 
@@ -267,40 +287,111 @@ class App:
         output_dir = os.path.join(input_dir, "compressed")
         os.makedirs(output_dir, exist_ok=True)
 
-        files = [f for f in os.listdir(input_dir)
-                 if f.lower().endswith(VIDEO_EXTS) and "_compressed" not in f]
+        files = [
+            file for file in os.listdir(input_dir)
+            if file.lower().endswith(VIDEO_EXTS)
+            and "_compressed" not in file
+        ]
+
+        if not files:
+            self.log_write("対象動画がありません。")
+            self.set_current_file("なし")
+            self.set_running_state(False)
+            return
+
+        total_files = len(files)
+        completed_files = 0
+
+        self.log_write("=== 処理開始 ===")
+        self.log_write(f"Encoder: {encoder}")
+        self.log_write(f"Quality: {quality}")
+        self.log_write(f"CPU Preset: {cpu_preset}")
+        self.log_write(f"出力先: {output_dir}")
 
         for file in files:
             input_path = os.path.join(input_dir, file)
             name, _ = os.path.splitext(file)
             output_path = os.path.join(output_dir, f"{name}_compressed.mp4")
 
-            cmd = self.build_ffmpeg_command(input_path, output_path, quality, cpu_preset, encoder)
+            self.set_current_file(file)
+            self.update_file_progress(0)
 
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1
-            )
+            if os.path.exists(output_path):
+                self.log_write(f"スキップ（既に存在）: {file}")
+                completed_files += 1
+                self.update_total_progress(completed_files / total_files * 100)
+                continue
 
             duration = self.get_duration_seconds(input_path)
 
-            while True:
-                line = process.stdout.readline()
-                if line == "" and process.poll() is not None:
-                    break
+            if duration is None or duration <= 0:
+                self.log_write(f"動画時間を取得できませんでした: {file}")
 
-                if line.startswith("out_time_ms=") and duration:
-                    out_time_ms = int(line.split("=")[1])
-                    percent = (out_time_ms / 1_000_000) / duration * 100
-                    self.update_file_progress(percent)
+            self.log_write(f"処理開始: {file}")
 
-            process.wait()
+            cmd = self.build_ffmpeg_command(
+                input_path,
+                output_path,
+                quality,
+                cpu_preset,
+                encoder
+            )
 
+            try:
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1
+                )
+
+                last_lines = []
+
+                while True:
+                    line = process.stdout.readline()
+
+                    if line == "" and process.poll() is not None:
+                        break
+
+                    if not line:
+                        continue
+
+                    line = line.strip()
+
+                    if line:
+                        last_lines.append(line)
+                        if len(last_lines) > 20:
+                            last_lines.pop(0)
+
+                    if line.startswith("out_time_ms=") and duration:
+                        try:
+                            out_time_ms = int(line.split("=")[1])
+                            current_seconds = out_time_ms / 1_000_000
+                            percent = current_seconds / duration * 100
+                            self.update_file_progress(percent)
+                        except ValueError:
+                            pass
+
+                returncode = process.wait()
+
+                if returncode == 0:
+                    self.update_file_progress(100)
+                    self.log_write(f"完了: {file}")
+                else:
+                    self.log_write(f"失敗: {file}")
+                    self.log_write("---- ffmpegログ末尾 ----")
+                    for log_line in last_lines:
+                        self.log_write(log_line)
+
+            except Exception as e:
+                self.log_write(f"失敗: {file} | {e}")
+
+            completed_files += 1
+            self.update_total_progress(completed_files / total_files * 100)
+
+        self.set_current_file("なし")
+        self.log_write("=== 全処理終了 ===")
         self.set_running_state(False)
 
 
